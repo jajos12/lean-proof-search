@@ -1,4 +1,4 @@
-"""Pinned, stratified miniF2F validation development run; no official test use."""
+"""Pinned miniF2F validation runs: stratified development cohort or full split."""
 
 from __future__ import annotations
 
@@ -28,10 +28,15 @@ def _fetch(path):
     return response.text
 
 
-def _select(index, seed, per_group):
+def _select(index, seed, per_group, selection="stratified"):
     names = re.findall(r"^import MiniF2F\.Valid\.([A-Za-z0-9_]+)\s*$", index, re.MULTILINE)
     if len(names) != len(set(names)) or not names:
         raise ValueError("Invalid or duplicate validation index entries")
+    if selection == "full":
+        return [(name, "_".join(name.split("_")[:2]) if name.startswith("mathd_") else name.split("_")[0])
+                for name in sorted(names, key=lambda name: control._sha(f"{seed}:{name}"))]
+    if selection != "stratified":
+        raise ValueError("Unknown validation selection mode")
     selected = []
     for group in GROUPS:
         pool = [name for name in names if name.lower().startswith(group)]
@@ -42,47 +47,64 @@ def _select(index, seed, per_group):
     return selected
 
 
-def _prepare(root, seed, per_group):
+def _prepare(root, seed, per_group, selection="stratified"):
     path = root / "cohort.json"
     if path.exists():
         cohort = json.loads(path.read_text())
-        if cohort["commit"] != COMMIT or cohort["seed"] != seed or cohort["per_group"] != per_group:
+        if (cohort["repository"] != REPOSITORY or cohort["split"] != "valid"
+                or cohort["commit"] != COMMIT or cohort["seed"] != seed
+                or cohort["per_group"] != per_group or cohort.get("selection", "stratified") != selection):
             raise ValueError("Existing cohort uses a different revision/selection")
         index = (root / "valid_index.lean").read_text()
         if (control._sha(index) != cohort["index_sha256"]
-                or [(task["id"], task["group"]) for task in cohort["tasks"]] != _select(index, seed, per_group)):
+                or [(task["id"], task["group"]) for task in cohort["tasks"]] != _select(index, seed, per_group, selection)):
             raise ValueError("Saved cohort selection changed")
         for task in cohort["tasks"]:
+            if task["ingest_status"] == "pending":
+                continue
             source = (root / task["file"]).read_text()
             if control._sha(source) != task["source_sha256"]:
                 raise ValueError("Saved benchmark source changed")
             if task["ingest_status"] == "parsed" and _parse(task["id"], source) != {
                     "prefix": task["prefix"], "header": task["header"]}:
                 raise ValueError("Saved declaration differs from original source")
-        return cohort
-    root.mkdir(parents=True, exist_ok=True)
-    index = _fetch("MiniF2F/Valid.lean")
-    (root / "valid_index.lean").write_text(index)
-    selected = _select(index, seed, per_group)  # Freeze names before source/compatibility checks.
-    toolchain = _fetch("lean-toolchain").strip()
-    upstream = json.loads(_fetch("lake-manifest.json"))
-    mathlib = next(item["rev"] for item in upstream["packages"] if item["name"] == "mathlib")
-    tasks = []
-    for name, group in selected:
-        relative = f"sources/{name}.lean"
+    else:
+        root.mkdir(parents=True, exist_ok=True)
+        index = _fetch("MiniF2F/Valid.lean")
+        (root / "valid_index.lean").write_text(index)
+        selected = _select(index, seed, per_group, selection)  # Freeze before any source/compatibility result.
+        toolchain = _fetch("lean-toolchain").strip()
+        upstream = json.loads(_fetch("lake-manifest.json"))
+        mathlib = next(item["rev"] for item in upstream["packages"] if item["name"] == "mathlib")
+        cohort = {"repository": REPOSITORY, "commit": COMMIT, "split": "valid", "seed": seed,
+                  "per_group": per_group, "index_sha256": control._sha(index),
+                  "upstream_toolchain": toolchain, "upstream_mathlib": mathlib,
+                  "tasks": [{"id": name, "group": group, "file": f"sources/{name}.lean", "ingest_status": "pending"}
+                            for name, group in selected]}
+        if selection != "stratified":
+            cohort["selection"] = selection
+        control._write(path, cohort)
+    ready = sum(task["ingest_status"] != "pending" for task in cohort["tasks"])
+    if selection == "full":
+        print(json.dumps({"cohort": "full", "split": "valid", "selected_tasks": len(cohort["tasks"]),
+                          "source_files_ready": ready}), flush=True)
+    for task in cohort["tasks"]:
+        if task["ingest_status"] != "pending":
+            continue
+        name = task["id"]
         source = _fetch(f"MiniF2F/Valid/{name}.lean")
         (root / "sources").mkdir(exist_ok=True)
-        (root / relative).write_text(source)
-        task = {"id": name, "group": group, "file": relative, "source_sha256": control._sha(source)}
+        (root / task["file"]).write_text(source)
+        task["source_sha256"] = control._sha(source)
         try:
             task.update(_parse(name, source), ingest_status="parsed")
         except ValueError as error:
             task.update(ingest_status="unsupported", ingest_error=str(error))
-        tasks.append(task)
-    cohort = {"repository": REPOSITORY, "commit": COMMIT, "split": "valid", "seed": seed,
-              "per_group": per_group, "index_sha256": control._sha(index),
-              "upstream_toolchain": toolchain, "upstream_mathlib": mathlib, "tasks": tasks}
-    control._write(path, cohort)
+        control._write(path, cohort)
+        ready += 1
+        if selection == "full" and (ready % 25 == 0 or ready == len(cohort["tasks"])):
+            print(json.dumps({"cohort": "full", "source_files_ready": ready,
+                              "selected_tasks": len(cohort["tasks"])}), flush=True)
     return cohort
 
 
@@ -172,6 +194,7 @@ def _summary(report):
     repaired = sum(any(a.get("lean", {}).get("status") == "passed" and a.get("prompt_mode") == "repair"
                        for a in row["attempts"][1:]) for row in report["tasks"])
     result.update(compatible_tasks=sum(row.get("input_status") == "passed" for row in report["tasks"]),
+                  selection=report.get("cohort", {}).get("selection", "stratified"),
                   input_failures=sum(row.get("input_status") != "passed" for row in report["tasks"]),
                   baseline_checked_tasks=sum("automation" in row for row in report["tasks"]),
                   model_eligible_tasks=sum(row.get("input_status") == "passed"
@@ -197,6 +220,8 @@ def _summary(report):
                                           for row in report["tasks"]),
                   combined_solved=result["automation_solved"] + result["model_only_solved"] + replayed + search_solved,
                   note="miniF2F-valid development subset; not official test, not pretraining-held-out accuracy.")
+    if result["selection"] == "full":
+        result["note"] = "Full miniF2F validation split; not official test, not pretraining-held-out accuracy."
     return result
 
 
@@ -204,7 +229,9 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--lean-project", type=Path, required=True)
-    parser.add_argument("--per-group", type=int, default=5)
+    parser.add_argument("--cohort", choices=("stratified", "full"), default="stratified",
+                        help="Five-category development cohort or every problem in the validation index")
+    parser.add_argument("--per-group", type=int, help="Problems per category in stratified mode (default: 5)")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--baseline-only", action="store_true")
     parser.add_argument("--replay-report", type=Path,
@@ -238,6 +265,10 @@ def main(argv=None):
     parser.add_argument("--request-timeout", type=float, default=300)
     parser.add_argument("--resume", action="store_true")
     args = parser.parse_args(argv)
+    if args.cohort == "full" and args.per_group is not None:
+        parser.error("--per-group applies only to --cohort stratified")
+    if args.cohort == "stratified" and args.per_group is None:
+        args.per_group = 5
     search_budget, native_search = None, None
     if args.proof_engine == "search":
         from lean_proof_search.search import controller as native_search
@@ -245,14 +276,14 @@ def main(argv=None):
             model_calls=args.search_model_calls, tactic_trials=args.search_tactic_trials,
             nodes=args.search_nodes, depth=args.search_depth, visits=args.search_visits, seconds=args.search_seconds,
             tactic_timeout=args.search_tactic_timeout)
-    if (args.per_group < 1 or args.seed < 0 or args.context_tokens <= args.max_new_tokens
+    if ((args.per_group is not None and args.per_group < 1) or args.seed < 0 or args.context_tokens <= args.max_new_tokens
             or args.max_new_tokens < 1 or args.max_heartbeats < 1 or args.max_rec_depth < 1
             or not math.isfinite(args.lean_timeout) or args.lean_timeout <= 0
             or not math.isfinite(args.request_timeout) or args.request_timeout <= 0):
         raise ValueError("Invalid cohort or token budget")
     if args.output_dir.exists() and not args.resume:
         raise FileExistsError("Output exists; use --resume or a new directory")
-    cohort = _prepare(args.output_dir, args.seed, args.per_group)
+    cohort = _prepare(args.output_dir, args.seed, args.per_group, args.cohort)
     context = control._lean_context(args.lean_project)
     lake = json.loads((context[0] / "lake-manifest.json").read_text())
     mathlib = next((item["rev"] for item in lake.get("packages", []) if item["name"] == "mathlib"), None)
@@ -275,6 +306,7 @@ def main(argv=None):
     if args.replay_report and args.replay_report.resolve() == (args.output_dir / "report.json").resolve():
         raise ValueError("Replay source must be a separate report")
     manifest = {"schema": "minif2f_valid_dev_v4", "cohort_sha256": control._sha(cohort),
+                "selection": args.cohort,
                 "source_repository": "https://github.com/jajos12/Mathematics-ai-atp",
                 "source_commit": "3d996a39cf0c7ea94d2dfecaac30d741e5c3e0f2",
                 "environment_mode": "upstream_pins" if exact else "explicit_development_port",

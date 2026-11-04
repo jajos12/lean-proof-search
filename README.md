@@ -37,6 +37,48 @@ The bundled backend uses cached **DeepSeek-Prover-V2-7B BF16**, pinned to
 callbacks, so other models can be integrated independently. Weights are loaded
 once, with explicit tokenizer-fidelity and context-budget checks.
 
+## Full miniF2F validation baseline, search disabled
+
+Problem loading is implemented in `src/lean_proof_search/benchmarks/minif2f.py`.
+`--cohort full` loads **all 244 validation problems**, including AMC and mathd
+categories. `--cohort stratified` (default) retains the original 25-problem pilot;
+`--per-group` applies only to that stratified mode.
+
+From this repository root in `atp`, with the ATP checkout available as a sibling:
+
+```sh
+git pull --ff-only origin main
+ATP_REPO=../Mathematics-ai-atp
+LD_PRELOAD= lean-proof-search \
+  --output-dir runs/minif2f_valid_full_whole \
+  --lean-project "$ATP_REPO/maths_ai/_support_files/sexpr_environment/mathlib4" \
+  --cohort full --proof-engine whole --max-attempts 1 --proof-style concise \
+  --allow-environment-port --seed 42 --device cuda:0 --dtype bfloat16 \
+  --context-tokens 12288 --max-new-tokens 4096 --request-timeout 120 \
+  --max-heartbeats 1000000 --max-rec-depth 2048 --lean-timeout 180
+```
+
+This is a fresh automation-plus-whole-proof baseline. Automation runs first;
+the model gets one complete-proof attempt on each compatible unsolved problem.
+There is no native proof search, feedback retry, or carry-forward of earlier
+proofs. Compare `automation_solved`, `model_solved`, and `combined_solved`, along
+with input failures, calls and token/time records.
+
+Selection and source hashes are fixed before compatibility/inference. Loading
+checkpoints each file, shows progress every 25 files, and resumes interrupted
+downloads with the same command plus `--resume`. Completed cached files are
+verified and reused. Source/compatibility failures stay in the full denominator.
+Use separate output directories for full and stratified runs. Official test
+sources are untouched. Existing legacy cohorts without a selection field remain
+valid stratified cohorts; their original selection/digests are preserved.
+
+Verification: **57 tests pass**, including real Lean 4.10 regressions, full-mode
+CLI execution, all-category selection, source-download resume, unsupported-input
+retention and cache/mode checks. Actual pinned preparation fetched and parsed
+**244/244 source headers**; server Lean compatibility/model outcomes are not
+implied by parsing. The cached full split reopens without network access, and
+its original 25-task subset matches the historical cohort digest exactly.
+
 ## Run the fixed miniF2F development pilot
 
 From this repository root, with the old ATP checkout available as a sibling:
@@ -61,7 +103,7 @@ are explicit: the package does not need an ATP installation or import any GNN
 code. `--replay-report` is optional; omit it for a fresh run. Reuse the same HF
 cache as the original backend control (`--hf-cache` if needed).
 
-The cohort is pinned to **25 validation-only problems**, five each from IMO,
+The default stratified cohort is pinned to **25 validation-only problems**, five each from IMO,
 AIME, algebra, induction and number theory. Selection precedes compatibility
 checks. Original headers and source hashes are preserved; failures remain in
 the denominator. Official test problems are not fetched. Pretraining exposure
@@ -109,11 +151,11 @@ typed lookup, forbidden axioms, cached replay and resume.
 
 ## Results and scope
 
-Latest measured source-system coverage: **12/25 accumulated development solves**
-(three automation, nine generated proofs). The previous two-task search pilot
-added zero solves. The prefix/binder/proactive-lookup repair and this repository
-extraction do not imply a new measured solve count. Carry-forward results and
-new calls are reported separately with cumulative cost.
+Latest reported standalone pilot coverage: **13/25 accumulated development solves**
+(three automation, nine earlier model proofs and one new native-search proof).
+AIME 1988 passed; binomial sum exhausted its 32-call budget. This does not
+establish full-split accuracy. The full-validation baseline above starts fresh;
+carry-forward results and new calls remain separate in development reports.
 
 Model weights, Mathlib builds, graphs and run artifacts remain external. GNN
 guidance is an optional future adapter. This repository contains the prover,

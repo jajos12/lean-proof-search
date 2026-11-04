@@ -37,6 +37,7 @@ def test_selection_is_fixed_stratified_validation_only_and_never_reads_test(monk
     monkeypatch.setattr(dev, "_fetch", fetch)
     cohort = dev._prepare(tmp_path / "sources", 42, 5)
     assert len(cohort["tasks"]) == 25
+    assert "selection" not in cohort  # Legacy cohort digests remain compatible.
     assert all(sum(t["group"] == group for t in cohort["tasks"]) == 5 for group in dev.GROUPS)
     assert [t["id"] for t in cohort["tasks"]] == [name for name, _ in dev._select(index, 42, 5)]
     assert all("rfl" not in t["header"] for t in cohort["tasks"])
@@ -46,6 +47,64 @@ def test_selection_is_fixed_stratified_validation_only_and_never_reads_test(monk
     (tmp_path / "sources" / first["file"]).write_text("changed")
     with pytest.raises(ValueError, match="source changed"):
         dev._prepare(tmp_path / "sources", 42, 5)
+
+
+def test_full_selection_includes_all_validation_categories_in_stable_order():
+    names = [f"{group}_0" for group in dev.GROUPS] + [
+        "amc12a_2020_p1", "amc12b_2020_p2", "mathd_algebra_1", "mathd_numbertheory_2"]
+    index = "\n".join("import MiniF2F.Valid." + name for name in names)
+    selected = dev._select(index, 42, None, "full")
+    assert {name for name, _ in selected} == set(names)
+    assert selected == dev._select("\n".join(reversed(index.splitlines())), 42, None, "full")
+    assert dict(selected)["mathd_algebra_1"] == "mathd_algebra"
+    assert dict(selected)["amc12a_2020_p1"] == "amc12a"
+    assert len(dev._select(index, 42, 1)) == 5
+    with pytest.raises(ValueError, match="duplicate"):
+        dev._select(index + "\n" + index.splitlines()[0], 42, None, "full")
+
+
+def test_full_loading_resumes_downloads_and_keeps_unsupported_inputs(monkeypatch, tmp_path):
+    names = ["imo_one", "amc12a_two", "mathd_algebra_three", "mathd_numbertheory_four"]
+    index = "\n".join("import MiniF2F.Valid." + name for name in names)
+    ordered = [name for name, _ in dev._select(index, 42, None, "full")]
+    calls, failed = [], []
+    def fetch(path):
+        calls.append(path)
+        assert "Test" not in path
+        if path == "MiniF2F/Valid.lean":
+            return index
+        if path == "lean-toolchain":
+            return "leanprover/lean4:v4.24.0"
+        if path == "lake-manifest.json":
+            return json.dumps({"packages": [{"name": "mathlib", "rev": "pinned"}]})
+        name = Path(path).stem
+        if name == ordered[1] and not failed:
+            failed.append(True)
+            raise ConnectionError("interrupted source download")
+        return _source(name) if name != ordered[2] else "import Foreign\n" + _source(name)
+    monkeypatch.setattr(dev, "_fetch", fetch)
+    root = tmp_path / "full"
+    with pytest.raises(ConnectionError):
+        dev._prepare(root, 42, None, "full")
+    partial = json.loads((root / "cohort.json").read_text())
+    assert len(partial["tasks"]) == 4
+    assert [task["ingest_status"] for task in partial["tasks"]] == ["parsed", "pending", "pending", "pending"]
+    result = dev._prepare(root, 42, None, "full")
+    assert result["selection"] == "full" and result["per_group"] is None
+    assert len(result["tasks"]) == 4 and result["tasks"][2]["ingest_status"] == "unsupported"
+    assert calls.count(f"MiniF2F/Valid/{ordered[0]}.lean") == 1
+    count = len(calls)
+    assert dev._prepare(root, 42, None, "full") == result and len(calls) == count
+    with pytest.raises(ValueError, match="different revision/selection"):
+        dev._prepare(root, 42, 5)
+
+
+def test_full_mode_rejects_per_group_before_creating_run(tmp_path):
+    output = tmp_path / "invalid"
+    with pytest.raises(SystemExit) as error:
+        dev.main(["--output-dir", str(output), "--lean-project", str(tmp_path),
+                  "--cohort", "full", "--per-group", "5", "--baseline-only"])
+    assert error.value.code == 2 and not output.exists()
 
 
 def test_header_boundary_ignores_comments_and_nested_default_assignments():
@@ -205,6 +264,20 @@ def test_baseline_then_model_resume_loads_no_model_during_baseline(tmp_path, mon
     assert pilot["summary"]["selected_tasks"] == 2
     assert pilot["summary"]["pending_model_tasks"] == 1  # Excluded tasks aren't called failures/completed.
     assert loads == caches == [1, 1]
+
+    def prepare_full(root, seed, per_group, selection):
+        assert per_group is None and selection == "full"
+        root.mkdir(exist_ok=True)
+        return {**cohort, "selection": "full", "per_group": None}
+    monkeypatch.setattr(dev, "_prepare", prepare_full)
+    full_output = tmp_path / "full_whole"
+    assert dev.main(["--output-dir", str(full_output), "--lean-project", str(project),
+                     "--allow-environment-port", "--cohort", "full", "--proof-engine", "whole",
+                     "--max-attempts", "1"]) == 0
+    full = json.loads((full_output / "report.json").read_text())
+    assert full["manifest"]["selection"] == full["summary"]["selection"] == "full"
+    assert full["manifest"]["proof_engine"] == "whole" and full["summary"]["model_calls"] == 1
+    assert full["summary"]["selected_tasks"] == full["summary"]["combined_solved"] == 2
 
 
 @pytest.mark.parametrize("raw", [
