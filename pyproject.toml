@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lean-proof-search"
+version = "0.1.0"
+description = "Bounded LLM proof search with native Lean snapshots and frozen-target verification"
+requires-python = ">=3.10"
+license = {file = "LICENSE"}
+readme = "README.md"
+dependencies = ["requests>=2.31,<3"]
+
+[project.urls]
+Repository = "https://github.com/jajos12/lean-proof-search"
+
+[project.optional-dependencies]
+inference = ["torch>=2.7,<3", "transformers>=4.56,<6", "accelerate>=1,<2", "huggingface-hub>=0.30,<2", "packaging>=23"]
+test = ["pytest>=8,<10"]
+
+[project.scripts]
+lean-proof-search = "lean_proof_search.benchmarks.minif2f:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+lean_proof_search = ["resources/*.lean"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

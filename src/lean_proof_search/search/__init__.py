@@ -1,0 +1,1 @@
+"""Native stateful search controller."""

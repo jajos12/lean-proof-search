@@ -1,0 +1,16 @@
+Lean Proof Search is derived from the proof-generation and native Lean search
+implementation in Mathematics-ai-atp.
+
+Original project: https://github.com/iCog-Labs-Dev/Mathematics-ai-atp
+Working fork: https://github.com/jajos12/Mathematics-ai-atp
+Extraction source: 3d996a39cf0c7ea94d2dfecaac30d741e5c3e0f2
+
+Original authors and contributors retain their respective copyrights.
+The original GNU General Public License version 2 is included verbatim in LICENSE.
+
+Extraction modifications: standalone Python packaging, import/module boundaries,
+packaged Lean resource loading, package-wide implementation hashes, migration
+documentation, and independent installation/regression checks. Search semantics,
+model revision, benchmark selection, and proof-validation contracts are retained.
+
+External model and benchmark assets have their own licenses and are not bundled.

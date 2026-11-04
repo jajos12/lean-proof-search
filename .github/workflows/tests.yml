@@ -1,0 +1,21 @@
+name: tests
+on: [push, pull_request]
+
+jobs:
+  standalone-native:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install standalone package
+        run: python -m pip install -e '.[test]'
+      - name: Install pinned Lean core
+        run: |
+          curl -sSf https://elan.lean-lang.org/elan-init.sh | sh -s -- -y --default-toolchain leanprover/lean4:v4.10.0-rc1
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+      - name: Native and package regressions
+        env:
+          LEAN_PROOF_SEARCH_TOOLCHAIN: leanprover/lean4:v4.10.0-rc1
+        run: python -m pytest -q
