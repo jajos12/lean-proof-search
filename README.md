@@ -72,7 +72,7 @@ Use separate output directories for full and stratified runs. Official test
 sources are untouched. Existing legacy cohorts without a selection field remain
 valid stratified cohorts; their original selection/digests are preserved.
 
-Verification: **57 tests pass**, including real Lean 4.10 regressions, full-mode
+Verification: **65 tests pass**, including real Lean 4.10 regressions, full-mode
 CLI execution, all-category selection, source-download resume, unsupported-input
 retention and cache/mode checks. Actual pinned preparation fetched and parsed
 **244/244 source headers**; server Lean compatibility/model outcomes are not
@@ -118,6 +118,33 @@ Add `--baseline-only` for CPU input/automation/replay checks. Repeat the same
 command with `--resume` after interruption. Changed code/environment/budgets
 require a new directory. Old ATP v1/v2/v3 reports can seed fresh runs; their
 completed proofs are reverified, never trusted solely by saved status.
+
+### Recover a native Lean process crash
+
+Lean recursion/heartbeat limits are runtime exceptions; ordinary Lean `try/catch`
+does not catch them. The helper explicitly catches runtime exceptions and resets
+request recursion accounting. Exited native processes during split/lookup/step
+are isolated; one fresh-process retry replays accepted prefixes. Wall timeouts
+are not retried, and completed model responses remain checkpointed.
+
+After installing this fix, continue the **same original command and output
+directory**, adding:
+
+```sh
+--resume --recover-native-crash
+```
+
+The explicit recovery option only permits a saved standalone search run stopped
+with `Native Lean exited:`. It verifies old bindings and allows implementation
+changes only to native helper, controller and benchmark runner. Cohort, model,
+environment and all budgets must match exactly. Normal `--resume` remains strict.
+
+Before migration, the complete original JSON is archived next to the report as
+`report.pre_native_recovery_<digest>.json`. `recovery_history` retains the old
+manifest/binding/error and records the patch boundary. Completed tasks, verified
+proofs, current graph, saved answers, call counts and active elapsed time are
+preserved; budgets are **not reset**. Subsequent resumes are idempotent. Results
+span a documented recovery revision, not an uninterrupted single-code run.
 
 ## Core API
 

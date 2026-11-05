@@ -60,6 +60,50 @@ def test_native_restart_reconstructs_prefix_and_keeps_remaining_alternatives():
     assert sessions[1].requests == ["intro h", "exact h"]
 
 
+def test_split_process_exit_recovers_saved_completion_without_new_generation():
+    sessions = []
+    class Session:
+        def __init__(self):
+            self.number = len(sessions)
+            self.root = {"state": self.number * 100, "goals": ["P"]}
+            sessions.append(self)
+        def request(self, command, state, timeout, **payload):
+            assert state // 100 == self.number
+            if command == "split" and self.number == 0:
+                raise RuntimeError("Native Lean exited: maximum recursion depth has been reached")
+            if command == "split":
+                return {"status": "ok", "prefixes": [payload["tactic"]]}
+            return {"status": "ok", "state": state + 1, "goals": []}
+        def close(self):
+            pass
+    record = {"elapsed_seconds": 123, "calls": [{"node": 0, "seed": 42,
+              "raw_text": "```lean4\nexact h\n```", "expanded": True}],
+              "nodes": [{"steps": [], "goals": ["P"], "visits": 1, "expansions": 1,
+                         "tried": [], "lookups": [], "feedback": []}]}
+    search.search({"prefix": "", "header": "theorem target (P : Prop) (h : P) : P"}, record,
+                  lambda *a: pytest.fail("saved answer must not be regenerated"), lambda *a: {"status": "passed"},
+                  lambda: None, lambda left: Session(), budget=search.SearchBudget(model_calls=1), branching=3, seed=42)
+    assert record["status"] == "passed" and len(record["calls"]) == 1
+    assert record["elapsed_seconds"] >= 123 and len(sessions) == 2
+    assert record["native_failures"][0]["command"] == "split"
+
+
+def test_persistent_native_exit_is_bounded_and_does_not_abort_search():
+    class Session:
+        root = {"state": 0, "goals": ["P"]}
+        def request(self, *args, **kwargs):
+            raise RuntimeError("Native Lean exited: resource limit")
+        def close(self):
+            pass
+    record = {}
+    search.search({"prefix": "", "header": "theorem target (P : Prop) (h : P) : P"}, record,
+                  lambda *a: {"raw_text": "```lean4\nexact h\n```"},
+                  lambda *a: pytest.fail("no proof closed"), lambda: None, lambda left: Session(),
+                  budget=search.SearchBudget(model_calls=1), branching=3, seed=42)
+    assert record["status"] == "budget_exhausted"
+    assert len(record["native_failures"]) == 4  # Two split attempts, two execution attempts.
+
+
 def test_resume_executes_saved_completion_without_another_model_call():
     class Session:
         root = {"state": 0, "goals": ["P"]}
@@ -169,6 +213,20 @@ def test_native_startup_with_open_nat_postfix_factorial_notation(tmp_path):
         assert not closed["goals"]
         assert session.request("finish", closed["state"], 10)["status"] == "ok"
         assert session.proc.wait(timeout=10) == 0
+
+
+def test_native_recursion_limit_is_a_request_error_and_session_stays_usable(tmp_path):
+    context = _context(tmp_path)
+    task = {"id": "recursion_request", "prefix": ('import Lean\n'
+            'elab "test_depth_limit" : tactic => do Lean.throwMaxRecDepthAt (← Lean.getRef)\n'), "ingest_status": "parsed",
+            "header": "theorem recursion_request (P : Prop) (h : P) : P"}
+    with _factory(task, context)(30) as session:
+        failed = session.request("step", 0, 10, tactic="test_depth_limit")
+        assert failed["status"] == "lean_error" and "recursion depth" in failed["error"]
+        for _ in range(100):
+            assert session.request("split", 0, 10, tactic="exact h")["status"] == "ok"
+        closed = session.request("step", 0, 10, tactic="exact h")
+        assert not closed["goals"]
 
 
 def test_native_split_recovers_whole_tactics_not_lines_and_retains_progress(tmp_path):

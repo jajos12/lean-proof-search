@@ -225,6 +225,52 @@ def _summary(report):
     return result
 
 
+def _recover_native_crash(report, manifest, path):
+    """Narrow, explicit code migration; retain every task and remaining budget."""
+    old = report["manifest"]
+    error = report.get("operational_error", {})
+    allowed = {"resources/ProofSearch.lean", "search/controller.py", "benchmarks/minif2f.py"}
+    code_fields = {"implementation", "runner_sha256", "search_controller_sha256", "search_helper_sha256"}
+    if (old.get("schema") != "minif2f_valid_dev_v4" or old.get("proof_engine") != "search"
+            or control._sha(old) != report["binding"]
+            or control._sha(report["cohort"]) != old["cohort_sha256"]
+            or error.get("type") != "RuntimeError"
+            or not error.get("message", "").startswith("Native Lean exited:")):
+        raise ValueError("Recovery requires an intact standalone search checkpoint stopped by a native Lean exit")
+    if {k: v for k, v in old.items() if k not in code_fields} != {
+            k: v for k, v in manifest.items() if k not in code_fields}:
+        raise ValueError("Native recovery cannot change cohort, environment, model or budgets")
+    old_code, new_code = old.get("implementation", {}), manifest.get("implementation", {})
+    changed = {key for key in old_code.keys() | new_code.keys() if old_code.get(key) != new_code.get(key)}
+    if not changed or not changed <= allowed:
+        raise ValueError("Native recovery permits only helper, controller and runner fixes")
+    for field, filename in (("runner_sha256", "benchmarks/minif2f.py"),
+                            ("search_controller_sha256", "search/controller.py"),
+                            ("search_helper_sha256", "resources/ProofSearch.lean")):
+        if old.get(field) != old_code.get(filename) or manifest.get(field) != new_code.get(filename):
+            raise ValueError("Native recovery implementation digests are inconsistent")
+    raw = path.read_bytes()
+    if json.loads(raw) != report:
+        raise ValueError("Checkpoint changed while preparing native recovery")
+    digest = control._sha(raw.decode("utf-8"))
+    backup = path.with_name(f"report.pre_native_recovery_{digest[:12]}.json")
+    if backup.exists():
+        if backup.read_bytes() != raw:
+            raise ValueError("Native recovery backup already exists with different contents")
+    else:
+        with backup.open("xb") as handle:
+            handle.write(raw)
+    report.setdefault("recovery_history", []).append({
+        "kind": "native-crash-recovery", "source_sha256": digest, "backup": backup.name,
+        "previous_manifest": old, "previous_binding": report["binding"], "error": error,
+        "changed_modules": sorted(changed), "budget_reset": False,
+        "recovered_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    })
+    report.update(manifest=manifest, binding=control._sha(manifest))
+    report.pop("operational_error", None)
+    return report
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, required=True)
@@ -264,7 +310,11 @@ def main(argv=None):
     parser.add_argument("--lean-timeout", type=float, default=120)
     parser.add_argument("--request-timeout", type=float, default=300)
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--recover-native-crash", action="store_true",
+                        help="With --resume, migrate a native-exit checkpoint across a narrow helper/controller fix")
     args = parser.parse_args(argv)
+    if args.recover_native_crash and (not args.resume or not (args.output_dir / "report.json").exists()):
+        parser.error("--recover-native-crash requires --resume and an existing report.json")
     if args.cohort == "full" and args.per_group is not None:
         parser.error("--per-group applies only to --cohort stratified")
     if args.cohort == "stratified" and args.per_group is None:
@@ -346,7 +396,10 @@ def main(argv=None):
     if path.exists():
         report = json.loads(path.read_text())
         if report["binding"] != binding:
-            raise ValueError("Resume changes selection, sources, environment, code or budgets")
+            if args.recover_native_crash:
+                report = _recover_native_crash(report, manifest, path)
+            else:
+                raise ValueError("Resume changes selection, sources, environment, code or budgets")
     save = lambda: control._write(path, report)
     validate = lambda task, raw: _validate(task, raw, context, args.lean_timeout,
                                          args.max_heartbeats, args.max_rec_depth)

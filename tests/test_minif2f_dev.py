@@ -1,6 +1,7 @@
 """Source-faithful development selection and baseline-first execution."""
 
 import json
+import copy
 import os
 from pathlib import Path
 import sys
@@ -105,6 +106,60 @@ def test_full_mode_rejects_per_group_before_creating_run(tmp_path):
         dev.main(["--output-dir", str(output), "--lean-project", str(tmp_path),
                   "--cohort", "full", "--per-group", "5", "--baseline-only"])
     assert error.value.code == 2 and not output.exists()
+
+
+def _crashed_checkpoint(tmp_path):
+    cohort = {"tasks": [{"id": "done"}, {"id": "active"}]}
+    old_code = {name: dev.control._sha(name + " old") for name in (
+        "benchmarks/minif2f.py", "search/controller.py", "resources/ProofSearch.lean", "lean/tasks.py")}
+    manifest = {"schema": "minif2f_valid_dev_v4", "proof_engine": "search", "seed": 42,
+                "cohort_sha256": dev.control._sha(cohort), "runtime": {"transformers": "fixed"},
+                "search_budget": {"model_calls": 32, "seconds": 1200}, "implementation": old_code,
+                "runner_sha256": old_code["benchmarks/minif2f.py"],
+                "search_controller_sha256": old_code["search/controller.py"],
+                "search_helper_sha256": old_code["resources/ProofSearch.lean"]}
+    report = {"manifest": manifest, "binding": dev.control._sha(manifest), "cohort": cohort,
+              "tasks": [{"id": "done", "complete": True, "attempts": [], "search": {"status": "passed"}},
+                        {"id": "active", "attempts": [], "search": {"elapsed_seconds": 333,
+                         "calls": [{"raw_text": "saved answer"}], "nodes": [{"steps": ["intro h"]}]}}],
+              "operational_error": {"type": "RuntimeError", "message": "Native Lean exited: maximum recursion depth"}}
+    path = tmp_path / "report.json"
+    dev.control._write(path, report)
+    new = copy.deepcopy(manifest)
+    for field, name in (("runner_sha256", "benchmarks/minif2f.py"),
+                        ("search_controller_sha256", "search/controller.py"),
+                        ("search_helper_sha256", "resources/ProofSearch.lean")):
+        new["implementation"][name] = new[field] = dev.control._sha(name + " fixed")
+    return report, new, path
+
+
+def test_native_crash_migration_preserves_all_progress_and_archives_original(tmp_path):
+    report, manifest, path = _crashed_checkpoint(tmp_path)
+    original = copy.deepcopy(report)
+    raw = path.read_bytes()
+    result = dev._recover_native_crash(report, manifest, path)
+    assert result["tasks"] == original["tasks"]
+    assert result["binding"] == dev.control._sha(manifest)
+    assert "operational_error" not in result
+    history = result["recovery_history"][-1]
+    assert history["previous_manifest"] == original["manifest"] and history["budget_reset"] is False
+    assert (tmp_path / history["backup"]).read_bytes() == raw
+
+
+@pytest.mark.parametrize("changed", ["seed", "runtime", "search_budget"])
+def test_native_crash_migration_refuses_environment_or_budget_changes(tmp_path, changed):
+    report, manifest, path = _crashed_checkpoint(tmp_path)
+    manifest[changed] = "changed"
+    with pytest.raises(ValueError, match="cannot change"):
+        dev._recover_native_crash(report, manifest, path)
+    assert not list(tmp_path.glob("report.pre_native_recovery*"))
+
+
+def test_native_crash_migration_refuses_unrelated_code_changes(tmp_path):
+    report, manifest, path = _crashed_checkpoint(tmp_path)
+    manifest["implementation"]["lean/tasks.py"] = "changed checker"
+    with pytest.raises(ValueError, match="only helper"):
+        dev._recover_native_crash(report, manifest, path)
 
 
 def test_header_boundary_ignores_comments_and_nested_default_assignments():
@@ -247,6 +302,19 @@ def test_baseline_then_model_resume_loads_no_model_during_baseline(tmp_path, mon
     assert searched["summary"]["combined_solved"] == 2
     assert searched["manifest"]["search_helper_sha256"]
     assert loads == caches == [1, 1]
+    old_tasks = copy.deepcopy(searched["tasks"])
+    old_helper = control._sha("helper before native crash fix")
+    searched["manifest"]["search_helper_sha256"] = old_helper
+    searched["manifest"]["implementation"]["resources/ProofSearch.lean"] = old_helper
+    searched["binding"] = control._sha(searched["manifest"])
+    searched["operational_error"] = {"type": "RuntimeError", "message": "Native Lean exited: recursion depth"}
+    control._write(search_output / "report.json", searched)
+    assert dev.main([*search_args, "--resume", "--recover-native-crash"]) == 0
+    recovered = json.loads((search_output / "report.json").read_text())
+    assert recovered["tasks"] == old_tasks and len(recovered["recovery_history"]) == 1
+    assert "operational_error" not in recovered
+    assert dev.main([*search_args, "--resume", "--recover-native-crash"]) == 0
+    assert loads == caches == [1, 1]  # Completed tasks aren't generated again.
 
     # Search proofs become freshly checked complete candidates in later runs.
     carried_output = tmp_path / "carried"

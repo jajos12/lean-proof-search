@@ -260,6 +260,7 @@ def search(task, record, generate, validate, save, session_factory, *, budget, b
     record.setdefault("trials", [])
     record.setdefault("duplicates", 0)
     record.setdefault("lookup_cache", {})
+    record.setdefault("native_failures", [])
     for node in record["nodes"]:
         node.setdefault("expansions", 0)
     record["budget"] = asdict(budget)
@@ -299,6 +300,38 @@ def search(task, record, generate, validate, save, session_factory, *, budget, b
             native_ids[index] = state
         return native_ids[index]
 
+    def request(command, index, **payload):
+        """Recover one exited process; do not retry expensive wall timeouts."""
+        error = "Theorem search budget exhausted"
+        for attempt in range(2):
+            if remaining() <= 0:
+                break
+            stage = "restore"
+            try:
+                state = restore(index)
+                stage = command
+                return session.request(command, state, min(budget.tactic_timeout, remaining()), **payload)
+            except (TimeoutError, RuntimeError) as exception:
+                error = str(exception)
+                close()
+                record["native_failures"].append({"command": command, "node": index, "stage": stage,
+                                                   "attempt": attempt + 1, "error": error})
+                checkpoint()
+                if isinstance(exception, TimeoutError):
+                    break
+        return {"status": "native_error", "error": error}
+
+    def restore_for_call(index, call):
+        try:
+            return restore(index)
+        except (TimeoutError, RuntimeError) as error:
+            close()
+            record["nodes"][index]["blocked"] = True
+            call.update(status="native_restore_error", processed=True, error=str(error))
+            record["native_failures"].append({"command": "restore", "node": index, "error": str(error)})
+            checkpoint()
+            return None
+
     try:
         if remaining() <= 0:
             record.update(status="budget_exhausted", stop_reason="wall_time")
@@ -330,16 +363,15 @@ def search(task, record, generate, validate, save, session_factory, *, budget, b
                 record["calls"].append(call)
                 node["visits"] += 1
                 checkpoint()
-            state = restore(index)
+            state = restore_for_call(index, call)
+            if state is None:
+                continue
             if not node.get("auto_lookup_done"):
                 for query in lookup_queries(node["goals"]):
                     if query not in record["lookup_cache"]:
-                        try:
-                            state = restore(index)
-                            result = session.request("lookup", state, min(budget.tactic_timeout, remaining()), query=query)
-                        except (TimeoutError, RuntimeError) as error:
-                            close()
-                            result = {"status": "lookup_error", "error": str(error)}
+                        result = request("lookup", index, query=query)
+                        if result.get("status") == "native_error":
+                            result["status"] = "lookup_error"
                         record["lookup_cache"][query] = {"query": query, **result, "automatic": True}
                     if not any(hit.get("query") == query for hit in node["lookups"]):
                         node["lookups"].append(record["lookup_cache"][query])
@@ -348,7 +380,9 @@ def search(task, record, generate, validate, save, session_factory, *, budget, b
                 if remaining() <= 0:
                     record["stop_reason"] = "wall_time"
                     break
-                state = restore(index)
+                state = restore_for_call(index, call)
+                if state is None:
+                    continue
             try:
                 if "raw_text" not in call:
                     call.update(generate(messages(task, node, branching), call["seed"], remaining()))
@@ -365,7 +399,7 @@ def search(task, record, generate, validate, save, session_factory, *, budget, b
                 continue
             call["proposal"] = proposal
             if "lookup" in proposal:
-                result = session.request("lookup", state, min(budget.tactic_timeout, remaining()), query=proposal["lookup"])
+                result = request("lookup", index, query=proposal["lookup"])
                 call["lookup_result"] = result
                 node["lookups"].append(result)
                 call["processed"] = True
@@ -380,7 +414,7 @@ def search(task, record, generate, validate, save, session_factory, *, budget, b
                 groups = []
                 for tactic in proposal["tactics"]:
                     before = len(groups)
-                    split = session.request("split", state, min(budget.tactic_timeout, remaining()), tactic=tactic)
+                    split = request("split", index, tactic=tactic)
                     call.setdefault("splits", []).append(split)
                     if split.get("status") == "ok":
                         for key in ("inner_prefixes", "adapted_prefixes", "prefixes"):
@@ -419,12 +453,7 @@ def search(task, record, generate, validate, save, session_factory, *, budget, b
                              "tactic": tactic, "status": "started"}
                     record["trials"].append(trial)
                     checkpoint()
-                try:
-                    state = restore(index)
-                    result = session.request("step", state, min(budget.tactic_timeout, remaining()), tactic=tactic)
-                except (TimeoutError, RuntimeError) as error:
-                    close()
-                    result = {"status": "native_error", "error": str(error)}
+                result = request("step", index, tactic=tactic)
                 trial.update(result)
                 if result["status"] != "ok":
                     call.setdefault("failed_groups", []).append(group)

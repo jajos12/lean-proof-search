@@ -101,8 +101,9 @@ partial def serve (states : Array Tactic.SavedState) : TacticM Unit := do
   let input ← IO.getStdin
   let line ← input.getLine
   if line.isEmpty then throwError "Native proof-search client disconnected"
-  let (nextStates, finished, response) ← Core.withCurrHeartbeats do
-    try
+  let before ← Tactic.saveState
+  let (nextStates, finished, response) ← MonadRecDepth.withRecDepth 0 <| Core.withCurrHeartbeats do
+    tryCatchRuntimeEx (do
       let request ← match Json.parse line with
         | .ok value => pure value
         | .error error => throwError error
@@ -153,9 +154,14 @@ partial def serve (states : Array Tactic.SavedState) : TacticM Unit := do
         return (states.push next, false, ← describe states.size)
       else
         throwError "Unknown native proof-search command"
-    catch exception =>
+    ) (fun exception => do
+      let error ← MonadRecDepth.withRecDepth 0 do
+        if exception.isMaxRecDepth then return "maximum recursion depth has been reached"
+        tryCatchRuntimeEx exception.toMessageData.toString
+          (fun _ => pure "Native request failed; error formatting exceeded its resource limit")
+      before.restore (restoreInfo := true)
       return (states, false, Json.mkObj [("status", toJson "lean_error"),
-        ("error", toJson (← exception.toMessageData.toString))])
+        ("error", toJson error)]))
   send response
   unless finished do serve nextStates
 
