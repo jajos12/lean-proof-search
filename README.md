@@ -178,11 +178,20 @@ typed lookup, forbidden axioms, cached replay and resume.
 
 ## Results and scope
 
-Latest reported standalone pilot coverage: **13/25 accumulated development solves**
-(three automation, nine earlier model proofs and one new native-search proof).
-AIME 1988 passed; binomial sum exhausted its 32-call budget. This does not
-establish full-split accuracy. The full-validation baseline above starts fresh;
-carry-forward results and new calls remain separate in development reports.
+Completed full-validation baseline: **159/244 (65.2%)** from 57 automation and
+102 one-shot model proofs. Search on the remaining 81 compatible failures added
+**23 proofs**, giving **182/244 (74.6%)**, a **9.4 percentage-point gain**.
+Remaining: 58 compatible unsolved problems and four input failures.
+
+Audited search cost: **1,059 completed model generations**, **1.45M output tokens**
+and **13h20m summed active search time**. About 93% of that time went to unsolved
+tasks. Twenty wins closed from a root candidate block; three used two accepted
+blocks. Complete proof scripts and stored compiler/axiom checks were consistent.
+See [full audit](docs/provenance.md#completed-full-validation-search-audit).
+
+This is a recovered validation development-port run, not official test accuracy.
+Additional coverage is measured with additional compute. Old reports and new
+calls are accounted separately; no test-split result is reported.
 
 Model weights, Mathlib builds, graphs and run artifacts remain external. GNN
 guidance is an optional future adapter. This repository contains the prover,
