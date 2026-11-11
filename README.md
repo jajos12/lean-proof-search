@@ -37,6 +37,99 @@ The bundled backend uses cached **DeepSeek-Prover-V2-7B BF16**, pinned to
 callbacks, so other models can be integrated independently. Weights are loaded
 once, with explicit tokenizer-fidelity and context-budget checks.
 
+## REST API
+
+Install the optional HTTP dependencies in your working environment:
+
+```sh
+python -m pip install -e '.[api]'
+```
+
+The existing server `atp` environment already has inference dependencies.
+For a fresh GPU environment, install `'.[api,inference]'` instead. API installation
+does not download model weights; inference uses the same pinned local HF cache.
+
+Start from this repository root:
+
+```sh
+ATP_REPO=../Mathematics-ai-atp
+LD_PRELOAD= lean-proof-api \
+  --lean-project "$ATP_REPO/maths_ai/_support_files/sexpr_environment/mathlib4" \
+  --job-dir runs/api --host 127.0.0.1 --port 8000
+```
+
+Interactive OpenAPI documentation: `http://127.0.0.1:8000/docs`.
+
+| Endpoint | Behavior |
+|---|---|
+| `GET /health` | Worker readiness, live queue count, cached-model state |
+| `POST /v1/proofs` | Enqueue an individual Lean proposition; returns HTTP 202 |
+| `GET /v1/proofs/{id}` | Poll phase/progress, terminal result, verification and cost |
+| `POST /v1/proofs/{id}/cancel` | Cancel queued work or request running cancellation |
+
+In another terminal:
+
+```sh
+curl http://127.0.0.1:8000/health
+
+curl -X POST http://127.0.0.1:8000/v1/proofs \
+  -H 'Content-Type: application/json' \
+  -d '{"statement":"∀ n : Nat, n + 0 = n","engine":"search","limits":{"model_calls":8,"seconds":300},"seed":42}'
+
+# Replace proof_ID with the returned id:
+curl http://127.0.0.1:8000/v1/proofs/proof_ID
+curl -X POST http://127.0.0.1:8000/v1/proofs/proof_ID/cancel
+```
+
+Input is a **closed Lean proposition**, not a natural-language question or whole
+theorem declaration. Project/imports/model/cache are server-controlled; client
+paths and unknown request fields are rejected. `engine` is `whole` or `search`.
+Automation is attempted first in either mode; easy goals can finish without
+loading a model. The response reports actual successful method.
+
+One worker serializes proof jobs and reuses one lazily loaded model across jobs.
+Default queue capacity is 16 queued jobs plus one running job. Queue full returns
+429; unavailable worker 503; invalid request 422; unknown job 404. Polling exposes
+`phase` and `progress` while running, then `stats` on completion. There is no
+benchmark-launch or streaming endpoint in this initial API.
+
+Successful results contain `verified: true`, permitted axioms and complete
+`lean_code`. Certificates are independently compiled without the host specification
+axiom. Other terminal states are `exhausted`, `failed` and `cancelled`.
+
+Request limits: **1–32 model calls**, **1–1,200 active seconds**, statement up to
+16,000 characters. Defaults are eight calls and 300 seconds. Active time starts
+when the worker begins, excludes queue/downtime, and includes input/automation,
+model loading, generation and verification. Automation has a separate 20 s cap;
+generation 120 s, compiler 180 s, each also bounded by remaining active time.
+Search retains tested 96-trial/64-node/depth-16/6-expansion bounds and 20 s native
+request limits. Whole mode uses independent complete-proof samples until success
+or limits. Generation stopping is cooperative, not hard GPU cancellation.
+
+Queued cancellation is immediate and frees capacity. Running cancellation is
+best-effort at checkpoints; an ongoing generation/compiler call finishes or
+times out first. Job artifacts/checkpoints live under `runs/api`. After process
+restart, queued/interrupted jobs resume from the last saved state only when
+policy/code/environment and request bindings match; otherwise they fail explicitly.
+Saved completions are reused; an interrupted call without output remains charged
+as a request slot. Abrupt termination can lose work/time since the last checkpoint.
+Completed histories remain pollable and full traces stay on disk.
+
+For remote binding, set `LEAN_PROOF_API_KEY` and use `--host 0.0.0.0`. Send
+`Authorization: Bearer <key>` on proof endpoints; health stays unauthenticated.
+The service refuses non-loopback binding without a key. Use one API process per
+GPU; the launch command fixes one Uvicorn worker.
+
+**Deployment boundary:** Lean elaborators/tactics can execute IO. This API is for
+trusted callers; a bearer token is not a sandbox. Isolate Lean execution in a
+restricted container/process environment before accepting untrusted public inputs,
+and terminate HTTPS at your existing proxy for remote access.
+
+Tests cover endpoints, auth, queue capacity, cancellation, restart policy, actual
+Lean input/automation/whole/search certificate checks, and cached-backend reuse.
+Model-path tests use scripted generators; they do not download weights or claim
+new benchmark solves. Install `'.[test,api]'` to run API tests.
+
 ## Full miniF2F validation baseline, search disabled
 
 Problem loading is implemented in `src/lean_proof_search/benchmarks/minif2f.py`.

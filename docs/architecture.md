@@ -13,10 +13,20 @@
 | `benchmarks.minif2f` | Fixed validation cohort and experiment CLI |
 | `artifacts` | Stable digests, atomic checkpoints, runtime and implementation provenance |
 | `runtime` | Internal compatibility facade for extracted experiment contracts |
+| `service` | Optional FastAPI job queue, cached executor, cancellation and certificates |
 
 The search and verifier import no benchmark runner, ATP module, Torch, PyG or
 Pantograph package. The generator/verifier/session factory are injected into
 `run_search`. The bundled miniF2F adapter supplies the default wiring.
+
+The REST service wires the same core interfaces for individual closed propositions.
+Its single worker owns the model and runs Lean work away from HTTP request threads.
+Requests have server-enforced limits; model and Lean project are server-controlled.
+Artifacts bind request, implementation, runtime and configuration. A successful API
+result also verifies a portable source certificate without the host stub axiom.
+Native/whole jobs restore saved outputs and recorded budgets after matching-policy
+restarts. HTTP cancellation is cooperative at checkpoints. The service targets
+trusted callers; authentication does not isolate executable Lean metaprograms.
 
 ## Search mechanics
 

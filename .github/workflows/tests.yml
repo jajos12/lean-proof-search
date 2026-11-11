@@ -10,7 +10,7 @@ jobs:
         with:
           python-version: '3.11'
       - name: Install standalone package
-        run: python -m pip install -e '.[test]'
+        run: python -m pip install -e '.[test,api]'
       - name: Install pinned Lean core
         run: |
           curl -sSf https://elan.lean-lang.org/elan-init.sh | sh -s -- -y --default-toolchain leanprover/lean4:v4.10.0-rc1
